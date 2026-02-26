@@ -1,0 +1,2 @@
+# SemFlow-IDS milestone-1 minimal dependencies
+# 标准库已覆盖主流程；如需后续增强可添加 pydantic/pytest 等
