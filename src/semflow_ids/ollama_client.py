@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
+import urllib.request
 from typing import Any
 
 
@@ -12,17 +14,19 @@ class OllamaClient:
         self,
         base_url: str | None = None,
         api_key: str | None = None,
-        model: str = "qwen3.5-397b-a17b",
+        model: str | None = None,
     ):
         # 支持环境变量配置
         self.base_url = (base_url or os.environ.get("OPENAI_BASEURL", "https://api.qnaigc.com/v1")).rstrip("/")
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        self.model = model
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self.model = model or os.environ.get("OPENAI_MODEL", "doubao-seed-2.0-lite")
+
+        # 验证 API key
+        if not self.api_key:
+            raise ValueError("API key is required. Set OPENAI_API_KEY environment variable.")
 
     def generate(self, prompt: str, system_prompt: str | None = None) -> dict[str, Any]:
         """调用 OpenAI 兼容 API"""
-        import urllib.request
-
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -45,14 +49,25 @@ class OllamaClient:
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            body = resp.read().decode("utf-8")
-            result = json.loads(body)
-            return {
-                "model": result.get("model"),
-                "response": result["choices"][0]["message"]["content"],
-                "usage": result.get("usage"),
-            }
+
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                body = resp.read().decode("utf-8")
+                result = json.loads(body)
+                return {
+                    "model": result.get("model"),
+                    "response": result["choices"][0]["message"]["content"],
+                    "usage": result.get("usage"),
+                }
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8") if e.fp else ""
+            return {"error": f"HTTP {e.code}: {e.reason}", "raw_error": body, "http_status": e.code}
+        except urllib.error.URLError as e:
+            return {"error": f"Connection error: {e.reason}", "raw_error": str(e)}
+        except json.JSONDecodeError as e:
+            return {"error": f"JSON parse error: {e}", "raw_error": body if 'body' in dir() else ""}
+        except Exception as e:
+            return {"error": f"Unexpected error: {e}", "raw_error": str(e)}
 
 
 def format_http_traffic_description(sample: dict[str, Any]) -> str:

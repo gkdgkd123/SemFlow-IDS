@@ -88,11 +88,25 @@ python main.py --input eve.json --output results.jsonl --enable-l1 --enable-l2
 
 ## 配置
 
-API 配置通过环境变量或代码修改：
+API 配置通过环境变量：
 
-- `OPENAI_BASEURL` - API 基础 URL
-- `OPENAI_API_KEY` - API Key
-- 模型名称: `qwen3.5-397b-a17b`
+- `OPENAI_BASEURL` - API 基础 URL (默认: https://api.qnaigc.com/v1)
+- `OPENAI_API_KEY` - API Key (必填)
+- `OPENAI_MODEL` - 模型名称 (默认: doubao-seed-2.0-lite)
+
+## 项目结构
+
+```
+SemFlow-IDS/
+├── main.py                 # 入口程序
+├── src/semflow_ids/
+│   ├── models.py           # 数据结构
+│   ├── l0_filter.py        # L0 规则检测
+│   ├── eve_parser.py       # EVE JSON 解析
+│   ├── ollama_client.py    # LLM API 客户端
+│   └── output_writer.py    # 结果输出
+└── README.md
+```
 
 ## 进展
 
@@ -104,3 +118,5 @@ API 配置通过环境变量或代码修改：
 - [x] 风险分数 1-10 分制
 - [x] 置信度输出
 - [x] 攻击载荷提取
+- [x] API 错误处理完善
+- [x] L1 结果 O(1) 查找优化

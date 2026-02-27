@@ -1,15 +1,16 @@
 import argparse
 import json
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from semflow_ids.detection.l0_filter import apply_l0_filter
-from semflow_ids.ingest.eve_parser import parse_eve_jsonl, write_traffic_samples_jsonl
-from semflow_ids.modeling.ollama_client import OllamaClient, analyze_l1, analyze_l2_group
+from semflow_ids.l0_filter import apply_l0_filter
+from semflow_ids.eve_parser import parse_eve_jsonl, write_traffic_samples_jsonl
+from semflow_ids.ollama_client import OllamaClient, analyze_l1, analyze_l2_group
 from semflow_ids.models import DetectionResult
-from semflow_ids.output.output_writer import write_detection_results_jsonl
+from semflow_ids.output_writer import write_detection_results_jsonl
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,11 +49,11 @@ def main() -> None:
     # L1 语义分析（仅对 L0_pass 的样本，分类抽样）
     l1_enabled = args.enable_l1
     l1_results = []
+    l1_lookup = {}  # O(1) 查找
     if l1_enabled:
         client = OllamaClient()
 
         # 分类抽样：按 event_type + has_http 分组，每组最多 10 条
-        from collections import defaultdict
         categories = defaultdict(list)
 
         for sample, l0_result in zip(samples, l0_results):
@@ -73,15 +74,18 @@ def main() -> None:
             for sample, l0_result in samples_to_analyze:
                 l1_analysis = analyze_l1(sample.to_dict(), client)
                 l1_results.append(l1_analysis)
+                l1_lookup[sample.sample_id] = l1_analysis  # 存入字典
+
                 semantic = l1_analysis.get("semantic_features", {})
-                print(f"[L1] {key[0]}({sample.sample_id}): isSuspicious={semantic.get('isSuspicious')}, features={semantic.get('semantic_features', [])[:2]}")
+                is_suspicious = semantic.get("is_suspicious", False) if isinstance(semantic, dict) else False
+                features = semantic.get("semantic_features", []) if isinstance(semantic, dict) else []
+                print(f"[L1] {key[0]}({sample.sample_id}): isSuspicious={is_suspicious}, features={features[:2]}")
 
     # 合并结果
     results = []
     l1_hit_count = 0
 
     # 按 src_ip 分组，为 L2 准备
-    from collections import defaultdict
     ip_groups = defaultdict(list)
 
     for sample, l0_result in zip(samples, l0_results):
@@ -89,33 +93,33 @@ def main() -> None:
             # 有 L0 告警，直接使用 L0 结果
             results.append(l0_result)
         elif l0_result.stage == "L0_pass" and l1_enabled:
-            # L0 通过，检查 L1 结果
-            l1_match = None
-            for l1 in l1_results:
-                if l1.get("sample_id") == sample.sample_id:
-                    l1_match = l1
-                    break
+            # L0 通过，检查 L1 结果（使用 O(1) 字典查找）
+            l1_match = l1_lookup.get(sample.sample_id)
 
             if l1_match:
                 semantic = l1_match.get("semantic_features", {})
-                is_suspicious = semantic.get("is_suspicious", False)
-                risk_level = semantic.get("risk_level", "low")
+                if isinstance(semantic, dict):
+                    is_suspicious = semantic.get("is_suspicious", False)
+                    risk_level = semantic.get("risk_level", "low")
 
-                # 风险分数映射
-                risk_score_map = {"low": 3, "medium": 6, "high": 8, "critical": 10}
-                risk_score = risk_score_map.get(risk_level, 5)
+                    # 风险分数映射
+                    risk_score_map = {"low": 3, "medium": 6, "high": 8, "critical": 10}
+                    risk_score = risk_score_map.get(risk_level, 5)
 
-                if is_suspicious:
-                    l1_hit_count += 1
+                    if is_suspicious:
+                        l1_hit_count += 1
 
-                # 保存样本和 L1 结果到 ip_groups，供 L2 使用
-                ip_groups[sample.src_ip].append({
-                    "sample": sample,
-                    "l0_result": l0_result,
-                    "l1_analysis": semantic,
-                    "l1_raw": l1_match,
-                    "risk_score": risk_score,
-                })
+                    # 保存样本和 L1 结果到 ip_groups，供 L2 使用
+                    ip_groups[sample.src_ip].append({
+                        "sample": sample,
+                        "l0_result": l0_result,
+                        "l1_analysis": semantic,
+                        "l1_raw": l1_match,
+                        "risk_score": risk_score,
+                    })
+                else:
+                    # L1 分析失败，保持 L0_pass
+                    results.append(l0_result)
             else:
                 results.append(l0_result)
         else:
@@ -127,7 +131,7 @@ def main() -> None:
     l2_results = {}
     if l2_enabled:
         print("[L2] 按来源 IP 关联分析...")
-        client = OllamaClient()
+        # 复用已有的 client，不重新实例化
 
         for src_ip, group in ip_groups.items():
             if len(group) >= 2:  # 至少2条流量才做关联分析
@@ -150,39 +154,39 @@ def main() -> None:
 
     # 应用 L2 结果到最终输出
     if l2_enabled and l2_results:
+        # 构建 sample_id -> src_ip 的映射
+        sample_to_ip = {}
+        for ip, group in ip_groups.items():
+            for item in group:
+                sample_to_ip[item["sample"].sample_id] = ip
+
         final_results = []
         for r in results:
-            if r.stage == "L1":
-                src_ip = None
-                # 找到对应的 src_ip
-                for ip, group in ip_groups.items():
-                    for item in group:
-                        if item["sample"].sample_id == r.sample_id:
-                            src_ip = ip
-                            break
+            src_ip = sample_to_ip.get(r.sample_id)
+            if src_ip and src_ip in l2_results:
+                l2 = l2_results[src_ip]
+                # 风险分数类型转换（确保是整数）
+                l2_risk = l2.get("risk_score", r.risk_score)
+                try:
+                    new_risk_score = int(l2_risk)
+                except (TypeError, ValueError):
+                    new_risk_score = r.risk_score
 
-                if src_ip and src_ip in l2_results:
-                    l2 = l2_results[src_ip]
-                    # 更新风险分数
-                    new_risk_score = l2.get("risk_score", r.risk_score)
-
-                    # 创建新的 DetectionResult
-                    final_results.append(DetectionResult(
-                        sample_id=r.sample_id,
-                        final_label=r.final_label,
-                        risk_score=new_risk_score,
-                        reason_short=l2.get("attack_summary", l2.get("traffic_summary", r.reason_short)),
-                        evidence_spans=r.evidence_spans,
-                        attack_type=", ".join(l2.get("attack_chain", [])) or None,
-                        suricata_alert=r.suricata_alert,
-                        stage="L2",
-                        model_meta={
-                            "l1_analysis": r.model_meta.get("l1_analysis") if r.model_meta else None,
-                            "l2_analysis": l2,
-                        },
-                    ))
-                else:
-                    final_results.append(r)
+                # 创建新的 DetectionResult
+                final_results.append(DetectionResult(
+                    sample_id=r.sample_id,
+                    final_label=r.final_label,
+                    risk_score=new_risk_score,
+                    reason_short=l2.get("attack_summary", l2.get("traffic_summary", r.reason_short)),
+                    evidence_spans=r.evidence_spans,
+                    attack_type=", ".join(l2.get("attack_chain", [])) or None,
+                    suricata_alert=r.suricata_alert,
+                    stage="L2",
+                    model_meta={
+                        "l1_analysis": r.model_meta.get("l1_analysis") if r.model_meta else None,
+                        "l2_analysis": l2,
+                    },
+                ))
             else:
                 final_results.append(r)
         results = final_results
