@@ -16,7 +16,7 @@ class OllamaClient:
     ):
         # 支持环境变量配置
         self.base_url = (base_url or os.environ.get("OPENAI_BASEURL", "https://api.qnaigc.com/v1")).rstrip("/")
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "sk-911fa5eda1928c72b66372a64045fcce10ed4c4ab80de72e8591c7413356bc98")
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.model = model
 
     def generate(self, prompt: str, system_prompt: str | None = None) -> dict[str, Any]:
