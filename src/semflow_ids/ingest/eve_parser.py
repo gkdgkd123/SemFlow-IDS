@@ -6,7 +6,7 @@ from typing import Any
 
 from semflow_ids.models import TrafficSample
 
-SUPPORTED_EVENT_TYPES = {"alert", "http", "flow"}
+SUPPORTED_EVENT_TYPES = {"alert", "http", "flow", "anomaly", "fileinfo"}
 
 
 def parse_eve_jsonl(file_path: str) -> tuple[list[TrafficSample], dict[str, int]]:
